@@ -3,16 +3,18 @@ import {
   Controller,
   Delete,
   Get,
+  HttpStatus,
   Param,
   Post,
   Query,
+  Req,
   Res,
   StreamableFile,
   UseGuards,
 } from "@nestjs/common";
 import { SkipThrottle } from "@nestjs/throttler";
 import * as contentDisposition from "content-disposition";
-import { Response } from "express";
+import { Request, Response } from "express";
 import { CreateShareGuard } from "src/share/guard/createShare.guard";
 import { ShareOwnerGuard } from "src/share/guard/shareOwner.guard";
 import { FileService } from "./file.service";
@@ -66,21 +68,51 @@ export class FileController {
     @Param("shareId") shareId: string,
     @Param("fileId") fileId: string,
     @Query("download") download = "true",
+    @Req() req: Request,
   ) {
     const file = await this.fileService.get(shareId, fileId);
 
-    const headers = {
-      "Content-Type": file.metaData.mimeType,
-      "Content-Length": file.metaData.size,
-    };
+    const range = req.headers.range;
+    const fileSize = file.metaData.size;
 
-    if (download === "true") {
-      headers["Content-Disposition"] = contentDisposition(file.metaData.name);
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : Number(fileSize) - 1;
+
+      const chunksize = end - start + 1;
+      const head = {
+        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": chunksize,
+        "Content-Type": file.metaData.mimeType || "",
+      };
+
+      if (download === "true") {
+        head["Content-Disposition"] = contentDisposition(file.metaData.name);
+      }
+
+      res.writeHead(HttpStatus.PARTIAL_CONTENT, head);
+      const buffer = await new Promise<Buffer>((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        file.file.on("data", (chunk: Buffer) => chunks.push(chunk));
+        file.file.on("end", () => resolve(Buffer.concat(chunks)));
+        file.file.on("error", (error: Error) => reject(error));
+      });
+      return new StreamableFile(Buffer.from(buffer.subarray(start, end + 1)));
+    } else {
+      const headers = {
+        "Content-Type": file.metaData.mimeType,
+        "Content-Length": fileSize,
+      };
+
+      if (download === "true") {
+        headers["Content-Disposition"] = contentDisposition(file.metaData.name);
+      }
+
+      res.set(headers);
+      return new StreamableFile(file.file);
     }
-
-    res.set(headers);
-
-    return new StreamableFile(file.file);
   }
 
   @Delete(":fileId")
